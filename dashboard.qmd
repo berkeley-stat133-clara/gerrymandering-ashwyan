@@ -3,3 +3,17 @@ title: Dashboard
 format: dashboard
 ---
 
+```{r}
+# install.packages(c("tidyverse","sf","readxl","janitor","scales","patchwork"))
+library(tidyverse)
+library(sf)
+library(readxl)
+library(janitor)
+library(scales)
+library(patchwork) 
+
+```
+
+```{r}
+
+```
