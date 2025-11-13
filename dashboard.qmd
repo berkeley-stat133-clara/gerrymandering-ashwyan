@@ -4,14 +4,17 @@ format: dashboard
 ---
 
 ```{r}
-# install.packages(c("tidyverse","sf","readxl","janitor","scales","patchwork"))
 library(tidyverse)
 library(sf)
 library(readxl)
 library(janitor)
 library(scales)
-library(patchwork) 
+```
 
+```{r}
+g24_sov <- read_csv("data/g24_sov_by_g24_svprec.csv")
+g24_candidate <- read_csv("data/g24-candidates-by-district.csv")
+g24_result <- read_excel("data/g24-results-by-district.xlsx")
 ```
 
 ```{r}
