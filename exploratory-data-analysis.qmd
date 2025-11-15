@@ -1,28 +1,198 @@
 ---
-title: Exploratory Data Analysis
-format: typst
+title: "Part 3: Exploratory Data Analysis"
+author: "Analysis"
+format: html
+editor: visual
 ---
 
-### Question 1
+## Introduction
 
-Put your question here.
+This document explores the cleaned 2024 precinct-level election data to answer a few initial questions. The goal is to understand the dataset's characteristics and uncover preliminary insights through summary statistics and visualizations.
 
-### Answer 1
+We will investigate three main questions:
+1.  What is the distribution of precinct sizes (by registered voters)?
+2.  Which Congressional district had the closest race (by percentage margin)?
+3.  How many Congressional districts featured two candidates from the same party?
 
-Put your answer here.
+## 1. Setup
 
-### Question 2
+First, we load the `tidyverse` package, which includes `readr`, `dplyr`, `stringr`, and `ggplot2`.
 
-Put your question here.
+```{r setup}
+# Load the tidyverse library for data manipulation, reading, and plotting
+library(tidyverse)
+```
 
-### Answer 2
+## 2. Load Data
 
-Put your answer here.
+We load the cleaned precinct-level data from Part 2 and the candidate data.
 
-### Question 3
+```{r load-data}
+# Load the cleaned precinct data
+precinct_data_cleaned <- g24_sov_precinct_cleaned
+    # read_csv("g24_sov_precinct_cleaned.csv", 
+    #                               col_types = cols(
+    #                                 FIPS = "c",
+    #                                 SVPREC = "c"
+    #                               ))
 
-Put your question here.
+# Load the candidate information file
+candidates_data <- read_csv("data/g24-candidates-by-district.csv")
 
-### Answer 3
+# Glimpse the data
+glimpse(precinct_data_cleaned)
+glimpse(candidates_data)
+```
 
-Put your answer here.
+---
+
+## 3. Exploratory Questions
+
+### Q1: What is the distribution of precinct sizes (by registered voters)?
+
+This question helps us understand the typical size and variability of the "building blocks" of our election data.
+
+```{r q1-precinct-size}
+# Calculate summary statistics for total registered voters (TOTREG)
+precinct_size_summary <- summary(precinct_data_cleaned$TOTREG)
+cat("Summary statistics for registered voters per precinct:\n")
+print(precinct_size_summary)
+
+# Visualize the distribution with a histogram
+# We'll cap the x-axis to zoom in on the main distribution, as some
+# precincts (e.g., large vote centers) might be extreme outliers.
+ggplot(precinct_data_cleaned, aes(x = TOTREG)) +
+  geom_histogram(binwidth = 100, fill = "#0072B2", color = "white", boundary = 0) +
+  scale_x_continuous(limits = c(0, 5000), oob = scales::oob_squish) +
+  labs(
+    title = "Distribution of Precinct Sizes (Registered Voters)",
+    subtitle = "Most precincts have fewer than 2,000 registered voters. The x-axis is capped at 5,000.",
+    x = "Total Registered Voters (TOTREG)",
+    y = "Number of Precincts"
+  ) +
+  theme_minimal()
+```
+
+**Answer:** The summary statistics and histogram show a distribution heavily skewed to the right. The median precinct has `r round(precinct_size_summary["Median"])` registered voters, but the mean is higher at `r round(precinct_size_summary["Mean"])`, indicating the presence of some very large precincts. The vast majority of precincts have fewer than 2,000 registered voters.
+
+---
+
+### Q2: Which Congressional district had the closest race (by percentage margin)?
+
+This question identifies the most competitive races in the election. For this analysis, we will focus on 2-candidate races.
+
+```{r q2-closest-race}
+# Get all unique "FIELD" names for Congressional (CNG) candidates
+cng_candidates <- candidates_data %>%
+  filter(DISTRICT_TYPE == "CNG") %>%
+  mutate(PARTY = str_sub(FIELD, 4, 6)) %>%
+  select(DISTRICT, FIELD, NAME, PARTY)
+
+cng_cols <- unique(cng_candidates$FIELD)
+
+# 1. Aggregate precinct votes up to the district (CDDIST) level
+district_totals <- precinct_data_cleaned %>%
+  group_by(CDDIST) %>%
+  # Sum all candidate columns that appear in the CNG candidate file
+  summarize(across(any_of(cng_cols), sum), .groups = "drop")
+
+# 2. Pivot to long format: one row per candidate per district
+district_totals_long <- district_totals %>%
+  pivot_longer(
+    cols = -CDDIST,
+    names_to = "FIELD",
+    values_to = "VOTES"
+  )
+
+# 3. Join with candidate info and filter out non-contested candidates
+district_results <- district_totals_long %>%
+  # A candidate might be in cng_cols but have 0 votes in a specific district
+  filter(VOTES > 0) %>% 
+  left_join(cng_candidates, by = c("CDDIST" = "DISTRICT", "FIELD"))
+
+# 4. Calculate margins
+race_margins <- district_results %>%
+  group_by(CDDIST) %>%
+  # Get top 2 candidates' votes, sorted descending
+  summarize(
+    num_candidates = n(),
+    total_votes = sum(VOTES),
+    votes_top_2 = sort(VOTES, decreasing = TRUE)[1:2],
+    candidate_names = NAME[order(VOTES, decreasing = TRUE)][1:2]
+  ) %>%
+  # We only want to compare 2-candidate races for a clean margin
+  filter(num_candidates == 2) %>%
+  mutate(
+    margin_abs = votes_top_2[1] - votes_top_2[2],
+    margin_pct = margin_abs / total_votes,
+    winner = candidate_names[1],
+    loser = candidate_names[2]
+  ) %>%
+  select(CDDIST, winner, loser, total_votes, margin_abs, margin_pct) %>%
+  ungroup()
+
+# Get the closest race
+closest_race <- race_margins %>%
+  arrange(margin_pct) %>%
+  head(1)
+
+# Get the biggest blowout
+blowout_race <- race_margins %>%
+  arrange(desc(margin_pct)) %>%
+  head(1)
+
+```
+
+**Answer:**
+
+**Closest Race:**
+The closest 2-candidate Congressional race was in **District `r closest_race$CDDIST`**.
+* **Winner:** `r closest_race$winner`
+* **Loser:** `r closest_race$loser`
+* **Margin:** `r format(closest_race$margin_abs, big.mark = ",")` votes (`r round(closest_race$margin_pct * 100, 2)`% of `r format(closest_race$total_votes, big.mark = ",")` total votes).
+
+**Biggest Blowout:**
+The biggest blowout in a 2-candidate Congressional race was in **District `r blowout_race$CDDIST`**.
+* **Winner:** `r blowout_race$winner`
+* **Loser:** `r blowout_race$loser`
+* **Margin:** `r format(blowout_race$margin_abs, big.mark = ",")` votes (`r round(blowout_race$margin_pct * 100, 2)`% of `r format(blowout_race$total_votes, big.mark = ",")` total votes).
+
+---
+
+### Q3: How many Congressional districts featured two candidates from the same party?
+
+This is a common feature of California's "Top Two" primary system. We can find this by analyzing the candidate data file.
+
+```{r q3-same-party}
+# Use the cng_candidates table from the previous question
+party_counts <- cng_candidates %>%
+  group_by(DISTRICT) %>%
+  summarize(
+    num_candidates = n(),
+    num_parties = n_distinct(PARTY),
+    parties = str_c(sort(unique(PARTY)), collapse = " & ")
+  ) %>%
+  ungroup()
+
+# Filter for 2-candidate races with only 1 party
+same_party_races <- party_counts %>%
+  filter(num_candidates == 2 & num_parties == 1)
+
+# Get details on who ran
+same_party_details <- cng_candidates %>%
+  # Keep only candidates in those districts
+  semi_join(same_party_races, by = "DISTRICT") %>%
+  group_by(DISTRICT, PARTY) %>%
+  summarize(
+    Race = str_c(NAME, collapse = " vs. "),
+    .groups = "drop"
+  )
+```
+
+**Answer:**
+A total of **`r nrow(same_party_races)`** Congressional districts featured a general election race between two candidates of the same party.
+
+Here are the details:
+```{r echo=FALSE}
+knitr::kable(same_party_details, 
+             col.names = c("District", "Party", "Matchup"))

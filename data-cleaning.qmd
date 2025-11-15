@@ -1,5 +1,324 @@
 ---
-title: Data Cleaning
-format: typst
+title: "Part 2: Data Cleaning"
+author: "Analysis"
+format: html
+editor: visual
 ---
 
+## Introduction
+
+This document details the process of cleaning the 2024 General Election precinct-level Statement of Vote data (`g24_sov_by_g24_svprec.csv`). The goal is to ensure data types are correct, remove non-precinct summary rows, check for data integrity, and save a cleaned CSV file for further analysis.
+
+## 1. Setup
+
+First, we load the `tidyverse` package, which includes `readr` for reading data, `dplyr` for data manipulation, and `stringr` for string operations.
+
+```{r setup}
+# Load the tidyverse library for data manipulation and reading
+library(tidyverse)
+```
+
+## 2. Read Data
+
+We read the raw CSV data. Based on inspection of the file header and common FIPS code standards, we explicitly set the `FIPS` and `SVPREC` columns to be read as character types (`"c"`) to prevent FIPS codes from losing leading zeros and to handle non-numeric precinct identifiers.
+
+```{r read-data}
+# Define the file path
+file_path <- "data/g24_sov_by_g24_svprec.csv"
+
+# Read the data
+# We specify col_types for FIPS and SVPREC to ensure they are read as characters.
+# FIPS codes can have leading zeros, and SVPREC may not be purely numeric.
+raw_data <- read_csv(file_path, 
+                     col_types = cols(
+                       FIPS = "c",
+                       SVPREC = "c"
+                     ))
+
+# Display the first few rows and column types
+glimpse(raw_data)
+```
+
+## 3. Clean Data
+
+This section involves the main cleaning steps: filtering out summary rows, converting data types, and checking for initial errors.
+
+### 3.1. Filter Summary Rows
+
+California Statement of Vote files often include summary rows (e.g., totals for congressional districts, senate districts) in the same file as precinct-level data. Based on the file snippet (e.g., `SOV_CD03`), these summary rows appear to have an `SVPREC` value starting with `"SOV_"`.
+
+We will filter the dataset to *remove* these rows, keeping only the actual precinct-level data.
+
+```{r filter-summary-rows}
+# Filter out summary rows where SVPREC starts with "SOV_"
+precinct_data <- raw_data %>%
+  filter(!stringr::str_starts(SVPREC, "SOV_"))
+
+cat(sprintf("Raw data rows: %d\n", nrow(raw_data)))
+cat(sprintf("Precinct-only rows: %d\n", nrow(precinct_data)))
+cat(sprintf("Removed %d summary rows.\n", nrow(raw_data) - nrow(precinct_data)))
+```
+
+### 3.2. Correct Column Types
+
+The columns from `TOTREG` (Total Registered) to the end of the dataframe should all be numeric (integer) counts for registration or votes. We convert them all at once using `mutate()` and `across()`.
+
+```{r convert-types}
+# Convert all registration and vote columns to integer
+# We start from TOTREG to the last column in the data frame
+cleaned_data <- precinct_data %>%
+  mutate(across(TOTREG:last_col(), as.integer))
+
+# Check for NAs introduced by coercion
+# This would happen if a value like "*" or "N/A" was in a vote column
+na_counts <- colSums(is.na(cleaned_data))
+na_issues <- na_counts[na_counts > 0]
+
+if (length(na_issues) > 0) {
+  cat("Columns with NAs introduced during numeric conversion:\n")
+  print(na_issues)
+} else {
+  cat("No NAs introduced during numeric conversion.\n")
+}
+```
+
+## 4. Inspect Values and Integrity
+
+After cleaning, we perform checks to ensure the data is plausible.
+
+### 4.1. Check for Unique Key
+
+The `SVPREC_KEY` column should uniquely identify each precinct row. We check for duplicates.
+
+```{r check-uniqueness}
+is_key_unique <- !any(duplicated(cleaned_data$SVPREC_KEY))
+
+if (is_key_unique) {
+  cat("Data Integrity Check: SVPREC_KEY is unique. (PASS)\n")
+} else {
+  cat("Data Integrity Check: Found duplicate SVPREC_KEY values! (FAIL)\n")
+  # Optional: show the duplicates
+  # duplicates <- cleaned_data %>%
+  #   group_by(SVPREC_KEY) %>%
+  #   filter(n() > 1) %>%
+  #   ungroup()
+  # print(duplicates)
+}
+```
+
+### 4.2. Check for Plausible Values
+
+Vote and registration counts should not be negative. We check the `TOTVOTE` and `TOTREG` columns for any values below zero.
+
+```{r check-plausible-values}
+negative_votes <- cleaned_data %>%
+  filter(TOTVOTE < 0)
+
+negative_reg <- cleaned_data %>%
+  filter(TOTREG < 0)
+
+if (nrow(negative_votes) == 0) {
+  cat("Data Integrity Check: No negative values in TOTVOTE. (PASS)\n")
+} else {
+  cat(sprintf("Data Integrity Check: Found %d rows with negative TOTVOTE values. (FAIL)\n", nrow(negative_votes)))
+}
+
+if (nrow(negative_reg) == 0) {
+  cat("Data Integrity Check: No negative values in TOTREG. (PASS)\n")
+} else {
+  cat(sprintf("Data Integrity Check: Found %d rows with negative TOTREG values. (FAIL)\n", nrow(negative_reg)))
+}
+
+# Also, let's look at a summary of the main vote/reg columns
+summary(cleaned_data %>% select(TOTREG, TOTVOTE, PRCVOTE, ABSVOTE))
+```
+
+## 5. Write Cleaned Data
+
+Finally, we write the cleaned data frame to a new CSV file. This file will be used for all subsequent analysis.
+
+```{r write-csv}
+# Define the output file name
+output_file <- "g24_sov_precinct_cleaned.csv"
+
+# Write the cleaned data to disk
+write_csv(cleaned_data, output_file)
+
+cat(sprintf("Cleaned data successfully written to: %s\n", output_file))
+```
+
+---
+
+## Part 5: Re-running the 2024 Election (Approach A)
+
+This section details the process for Approach A: Area-weighted Interpolation. We will download and use the 2024 SR (Registration) Precinct vote data, the SR Precinct shapefiles, and the proposed AB 604 map shapefiles.
+
+**Note:** The following code chunks provide the full process. You will need to run the `download.file()` commands (after un-commenting them) to fetch the necessary data.
+
+### 5.1. Setup for Spatial Analysis
+
+We need the `sf` package for spatial data operations.
+
+```{r setup-spatial}
+# install.packages("sf") # Uncomment if you don't have 'sf'
+library(sf)
+library(tidyverse)
+```
+
+
+### 5.2. Download Data
+
+Here are the links for the required files. We will download them into our `data` directory and unzip the shapefiles into `data/shapefiles`.
+
+```{r download-data}
+# Create directories if they don't exist
+dir.create("data", showWarnings = FALSE)
+dir.create("data/shapefiles", showWarnings = FALSE)
+
+# 1. 2024 Votes by SR Precinct
+# URL from: [https://statewidedatabase.org/d20/g24.html](https://statewidedatabase.org/d20/g24.html)
+sr_votes_url <- "[https://statewidedatabase.org/pub/g24/g24_sov_by_g24_srprec.csv](https://statewidedatabase.org/pub/g24/g24_sov_by_g24_srprec.csv)"
+sr_votes_path <- "data/g24_sov_by_g24_srprec.csv"
+download.file(sr_votes_url, sr_votes_path)
+
+# 2. SR Precinct Shapefiles
+# URL from: [https://statewidedatabase.org/d20/g24_geo_conv.html](https://statewidedatabase.org/d20/g24_geo_conv.html)
+sr_shape_url <- "[https://statewidedatabase.org/pub/g24/g24_srprec_statewide_shapefile.zip](https://statewidedatabase.org/pub/g24/g24_srprec_statewide_shapefile.zip)"
+sr_shape_zip <- "data/shapefiles/g24_srprec.zip"
+sr_shape_dir <- "data/shapefiles/g24_srprec"
+download.file(sr_shape_url, sr_shape_zip)
+unzip(sr_shape_zip, exdir = sr_shape_dir)
+
+# 3. Proposed Congressional Map (AB 604)
+# URL from: [https://aelc.assembly.ca.gov/proposed-congressional-map](https://aelc.assembly.ca.gov/proposed-congressional-map)
+# Note: This is the "Final Proposed Map"
+ab604_url <- "[https://aelc.assembly.ca.gov/sites/aelc.assembly.ca.gov/files/Proposed-Congressional-Final-Map_0.zip](https://aelc.assembly.ca.gov/sites/aelc.assembly.ca.gov/files/Proposed-Congressional-Final-Map_0.zip)"
+ab604_zip <- "data/shapefiles/ab604.zip"
+ab604_dir <- "data/shapefiles/ab604"
+download.file(ab604_url, ab604_zip)
+unzip(ab604_zip, exdir = ab604_dir)
+```
+
+### 5.3. Load and Clean Vote & Spatial Data
+
+First, we load and clean the SR precinct votes, similar to how we cleaned the SV precinct data.
+
+```{r load-clean-sr-votes}
+# Load SR precinct votes
+sr_votes_raw <- read_csv("data/g24_sov_by_g24_srprec.csv",
+                         col_types = cols(FIPS = "c", SRPREC = "c"))
+
+# Clean SR votes - most importantly, filter out summary rows
+sr_votes_cleaned <- sr_votes_raw %>%
+  filter(!stringr::str_starts(SRPREC, "SOV_")) %>%
+  # Convert all vote columns (TOTREG to end) to numeric
+  # We use suppressWarnings to handle any non-numeric values gracefully
+  mutate(across(TOTREG:last_col(), ~suppressWarnings(as.integer(.)))) %>%
+  # Replace any NAs introduced with 0
+  mutate(across(TOTREG:last_col(), ~replace_na(., 0)))
+
+# Glimpse the cleaned SR vote data
+glimpse(sr_votes_cleaned)
+```
+
+Now, load and process the shapefiles.
+
+```{r load-clean-shapefiles}
+# Define CRS 3310 (California Albers, an equal-area projection)
+ca_albers_crs <- 3310
+
+# 1. Load and fix SR Precinct Shapefile
+# Note: Replace 'g24_srprec_statewide.shp' with the actual .shp filename after unzipping
+sr_shp_raw <- st_read("data/shapefiles/g24_srprec/g24_srprec_statewide.shp")
+
+# Fix SR precinct geometries using the code from the prompt
+sr_shp_cleaned <- sr_shp_raw %>%
+  st_transform(ca_albers_crs) %>% # switch to equal area projection
+  st_set_precision(1) %>%         # snap points to 1 m grid
+  st_make_valid() %>%             # fix self-intersections
+  st_collection_extract("POLYGON")
+
+# 2. Load and fix Proposed Map Shapefile
+# Note: Replace 'Proposed-Congressional-Final-Map.shp' with actual filename
+prop_map_raw <- st_read("data/shapefiles/ab604/Proposed-Congressional-Final-Map.shp")
+
+# Clean and transform the proposed map
+prop_map_cleaned <- prop_map_raw %>%
+  st_transform(ca_albers_crs) %>%
+  st_make_valid() %>%
+  # Select only the new district ID. Adjust 'DISTRICT' if the column name is different
+  select(NEW_DIST = DISTRICT) 
+
+# Glimpse the cleaned spatial data
+glimpse(sr_shp_cleaned)
+glimpse(prop_map_cleaned)
+```
+
+### 5.4. Join Votes to SR Precinct Map
+
+Join the vote data to the precinct polygons.
+
+```{r join-votes-to-shp}
+# Join votes to the cleaned shapefile
+# We need a common key. Let's inspect sr_shp_cleaned and sr_votes_cleaned
+# The SR precinct file has 'SRPREC_KEY'. The shapefile might have it too.
+# Let's assume the key is 'SRPREC_KEY'. If not, 'SRPREC' and 'FIPS' might be used.
+# For this example, we'll assume SRPREC_KEY works.
+sr_precincts_with_votes <- sr_shp_cleaned %>%
+  left_join(sr_votes_cleaned, by = "SRPREC_KEY") %>%
+  # Keep only precincts with votes
+  filter(!is.na(TOTREG))
+
+# Get all candidate columns to interpolate (e.g., CNGDEM01... USSDEM01...)
+# We'll select all columns from PR_2_N to the last column
+# This is a robust way to get all vote columns, but may need adjustment
+vote_cols <- names(sr_votes_cleaned)[which(names(sr_votes_cleaned) == "PR_2_N"):length(names(sr_votes_cleaned))]
+
+# Keep only the key, geometry, and vote columns for interpolation
+sr_precincts_to_interpolate <- sr_precincts_with_votes %>%
+  select(SRPREC_KEY, all_of(vote_cols), geometry)
+```
+
+### 5.5. Perform Area-Weighted Interpolation
+
+This is the core of Approach A. We'll find the intersection of the two maps, calculate area proportions, and allocate votes.
+
+```{r interpolation}
+# Add the original area to each precinct
+sr_precincts_to_interpolate <- sr_precincts_to_interpolate %>%
+  mutate(original_area = st_area(.))
+
+# 1. Intersect the two maps
+# This creates "slivers" of old precincts within new districts
+intersection <- st_intersection(sr_precincts_to_interpolate, prop_map_cleaned)
+
+# 2. Calculate area of each sliver and the proportion
+intersection <- intersection %>%
+  mutate(
+    sliver_area = st_area(.),
+    area_proportion = as.numeric(sliver_area / original_area)
+  )
+
+# 3. Allocate votes based on area proportion
+# We multiply every vote column by the area_proportion
+interpolated_votes <- intersection %>%
+  # Ensure proportion is max 1.0 (can be slightly over due to precision)
+  mutate(area_proportion = pmin(1, area_proportion)) %>%
+  # Apply proportion to all vote columns
+  mutate(across(all_of(vote_cols), ~ . * area_proportion))
+
+# 4. Aggregate votes by the new district
+hypothetical_results_df <- interpolated_votes %>%
+  st_drop_geometry() %>%
+  group_by(NEW_DIST) %>%
+  summarize(across(all_of(vote_cols), sum, na.rm = TRUE)) %>%
+  # Round the final vote counts to whole numbers
+  mutate(across(all_of(vote_cols), ~ round(., 0)))
+
+# Glimpse the final hypothetical results
+glimpse(hypothetical_results_df)
+
+# 5. Save the results for Part 6
+write_csv(hypothetical_results_df, "g24_hypothetical_results.csv")
+
+cat("Hypothetical election results saved to g24_hypothetical_results.csv\n")

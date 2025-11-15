@@ -1,22 +1,318 @@
 ---
-title: Dashboard
-format: dashboard
+title: "Part 4: Calculating Gerrymandering Metrics (2024 Map)"
+author: "Analysis"
+format: html
+editor: visual
 ---
 
-```{r}
+## Introduction
+
+This document calculates two common gerrymandering metrics—the Efficiency Gap and the Mean-Median Score—for the 2024 General Election congressional map. The goal is to establish a baseline for partisan advantage before comparing these results to the hypothetical election in Part 6.
+
+We will focus on the two major parties, Democrats and Republicans, and handle California's "Top Two" primary system by aggregating all Democratic and Republican candidate votes within each district.
+
+## 1. Setup
+
+First, we load the `tidyverse` package.
+
+```{r setup}
+# Load the tidyverse library for data manipulation
 library(tidyverse)
-library(sf)
-library(readxl)
-library(janitor)
-library(scales)
 ```
 
-```{r}
-g24_sov <- read_csv("data/g24_sov_by_g24_svprec.csv")
-g24_candidate <- read_csv("data/g24-candidates-by-district.csv")
-g24_result <- read_excel("data/g24-results-by-district.xlsx")
+## 2. Load Data
+
+We load the cleaned precinct data and the candidate information.
+
+```{r load-data}
+# Load the cleaned precinct data
+precinct_data_cleaned <- read_csv("g24_sov_precinct_cleaned.csv", 
+                                  col_types = cols(
+                                    FIPS = "c",
+                                    SVPREC = "c"
+                                  ))
+
+# Load the candidate information file
+candidates_data <- read_csv("g24-candidates-by-district.csv")
 ```
 
-```{r}
+## 3. Aggregate D vs. R Votes by District
 
+To calculate partisan metrics, we must first get the total votes for Democratic and Republican candidates in each congressional district (CDDIST).
+
+```{r aggregate-votes}
+# 1. Identify all Congressional (CNG) candidates and their parties
+cng_candidates_party <- candidates_data %>%
+  filter(DISTRICT_TYPE == "CNG") %>%
+  # Extract party (DEM, REP, etc.) from the 'FIELD' column (e.g., CNGDEM01)
+  mutate(PARTY_GROUP = str_sub(FIELD, 4, 6)) %>%
+  # Group non-major parties as "OTHER"
+  mutate(PARTY = case_when(
+    PARTY_GROUP == "DEM" ~ "DEM",
+    PARTY_GROUP == "REP" ~ "REP",
+    TRUE ~ "OTHER"
+  )) %>%
+  select(DISTRICT, FIELD, NAME, PARTY)
+
+# 2. Get a list of DEM and REP candidate columns to sum
+dem_cols <- cng_candidates_party %>% filter(PARTY == "DEM") %>% pull(FIELD)
+rep_cols <- cng_candidates_party %>% filter(PARTY == "REP") %>% pull(FIELD)
+
+# 3. Aggregate precinct votes to the district level
+district_partisan_votes <- precinct_data_cleaned %>%
+  # Group by Congressional District
+  group_by(CDDIST) %>%
+  # Sum all DEM candidate columns and all REP candidate columns
+  summarize(
+    dem_votes = sum(across(any_of(dem_cols)), na.rm = TRUE),
+    rep_votes = sum(across(any_of(rep_cols)), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Rename CDDIST for clarity, e.g., "District 1", "District 2"
+  mutate(DISTRICT = CDDIST) %>%
+  # Filter out any districts with 0 votes for both (e.g., summary rows missed)
+  filter(dem_votes > 0 | rep_votes > 0)
+
+# Display the first few rows of the aggregated data
+cat("Aggregated D vs. R Votes by District (2024 Map):\n")
+knitr::kable(head(district_partisan_votes))
 ```
+
+## 4. Calculate Gerrymandering Metrics
+
+With the D-vs-R vote totals for all 52 districts, we can now calculate the metrics.
+
+### 4.1. Helper Function for Wasted Votes
+
+We'll create a helper function as suggested. Wasted votes are defined as:
+* All votes for the losing candidate.
+* All votes for the winning candidate *above* the 50% + 1 threshold.
+
+```{r wasted-vote-function}
+calculate_wasted_votes <- function(votes_A, votes_B) {
+  total_votes <- votes_A + votes_B
+  
+  # Handle division by zero if a district has 0 votes
+  if (total_votes == 0) {
+    return(list(wasted_A = 0, wasted_B = 0))
+  }
+  
+  votes_to_win <- floor(total_votes / 2) + 1
+  
+  if (votes_A > votes_B) { # Party A wins
+    wasted_A <- votes_A - votes_to_win
+    wasted_B <- votes_B
+  } else if (votes_B > votes_A) { # Party B wins
+    wasted_A <- votes_A
+    wasted_B <- votes_B - votes_to_win
+  } else { # Tie
+    wasted_A <- votes_A
+    wasted_B <- votes_B
+  }
+  
+  return(list(wasted_A = wasted_A, wasted_B = wasted_B))
+}
+```
+
+### 4.2. Calculate Metrics
+
+Now we apply the function to our district data and compute the final scores.
+
+```{r calculate-metrics}
+# 1. Calculate vote shares and wasted votes for each district
+metric_data <- district_partisan_votes %>%
+  # Calculate wasted votes for each district
+  rowwise() %>%
+  mutate(
+    wasted = list(calculate_wasted_votes(dem_votes, rep_votes)),
+    wasted_dem = wasted$wasted_A,
+    wasted_rep = wasted$wasted_B
+  ) %>%
+  ungroup() %>%
+  # Calculate total votes and Democratic vote share
+  mutate(
+    total_votes = dem_votes + rep_votes,
+    dem_share = dem_votes / total_votes
+  ) %>%
+  # Handle districts with 0 total votes (prevents NaN)
+  filter(total_votes > 0)
+
+# 2. Calculate Efficiency Gap
+total_votes_statewide <- sum(metric_data$total_votes)
+total_wasted_dem <- sum(metric_data$wasted_dem)
+total_wasted_rep <- sum(metric_data$wasted_rep)
+
+efficiency_gap <- (total_wasted_dem - total_wasted_rep) / total_votes_statewide
+
+# 3. Calculate Mean-Median Score
+mean_dem_share <- mean(metric_data$dem_share, na.rm = TRUE)
+median_dem_share <- median(metric_data$dem_share, na.rm = TRUE)
+
+mean_median_score <- mean_dem_share - median_dem_share
+
+# 4. Calculate Seat Share
+dem_seats <- sum(metric_data$dem_votes > metric_data$rep_votes)
+rep_seats <- sum(metric_data$rep_votes > metric_data$dem_votes)
+total_seats <- dem_seats + rep_seats # Should be 52
+dem_seat_share <- dem_seats / total_seats
+```
+
+## 5. Results for 2024 Map
+
+Here are the baseline gerrymandering metrics for the 2024 congressional map.
+
+```{r print-results, echo=FALSE}
+cat(sprintf("--- 2024 Election Results (n = %d Districts) ---\n\n", total_seats))
+
+cat(sprintf("Seat Share:\n"))
+cat(sprintf("  Democrats: %d seats (%.1f%%)\n", dem_seats, dem_seat_share * 100))
+cat(sprintf("  Republicans: %d seats (%.1f%%)\n\n", rep_seats, (1 - dem_seat_share) * 100))
+
+cat(sprintf("Efficiency Gap:\n"))
+cat(sprintf("  Score: %.3f%% \n", efficiency_gap * 100))
+if (efficiency_gap > 0) {
+  cat("  Interpretation: A positive value suggests the map is biased *against* Democrats (in favor of Republicans).\n\n")
+} else {
+  cat("  Interpretation: A negative value suggests the map is biased *against* Republicans (in favor of Democrats).\n\n")
+}
+
+cat(sprintf("Mean-Median Score (for Democratic Vote Share):\n"))
+cat(sprintf("  Mean D-Share:   %.3f%%\n", mean_dem_share * 100))
+cat(sprintf("  Median D-Share: %.3f%%\n", median_dem_share * 100))
+cat(sprintf("  Score (Mean - Median): %.3f%%\n", mean_median_score * 100))
+if (mean_median_score > 0) {
+  cat("  Interpretation: A positive score (Mean > Median) suggests Democratic votes are 'packed' in uncompetitive districts, a disadvantage.\n")
+} else {
+  cat("  Interpretation: A negative score (Mean < Median) suggests Democratic votes are distributed more efficiently ('cracked'), an advantage.\n")
+}
+
+# Save results for dashboard
+write_csv(metric_data, "metric_data_2024.csv")
+cat("\nSaved 2024 metric data to metric_data_2024.csv\n")
+```
+
+---
+
+## Part 6: Calculating Gerrymandering Again (Proposed Map)
+
+Now we re-calculate the same metrics using the hypothetical election results from Part 5, which were saved to `g24_hypothetical_results.csv`.
+
+### 6.1. Load Hypothetical Data
+
+Load the data generated from the interpolation.
+
+```{r load-hypothetical-data}
+# Load the results
+hypothetical_results <- read_csv("g24_hypothetical_results.csv")
+
+# We need the candidate party lists (dem_cols, rep_cols) from Part 4
+# We can re-use the 'cng_candidates_party' data frame
+cng_candidates_party <- candidates_data %>%
+  filter(DISTRICT_TYPE == "CNG") %>%
+  mutate(PARTY_GROUP = str_sub(FIELD, 4, 6)) %>%
+  mutate(PARTY = case_when(
+    PARTY_GROUP == "DEM" ~ "DEM",
+    PARTY_GROUP == "REP" ~ "REP",
+    TRUE ~ "OTHER"
+  )) %>%
+  select(DISTRICT, FIELD, NAME, PARTY)
+
+dem_cols <- cng_candidates_party %>% filter(PARTY == "DEM") %>% pull(FIELD)
+rep_cols <- cng_candidates_party %>% filter(PARTY == "REP") %>% pull(FIELD)
+
+# Glimpse the data
+glimpse(hypothetical_results)
+```
+
+### 6.2. Aggregate D vs. R Votes (Proposed Map)
+
+The process is the same as in Part 3, but we group by `NEW_DIST`.
+
+```{r aggregate-hypothetical-votes}
+# Aggregate partisan votes for the new districts
+hypothetical_partisan_votes <- hypothetical_results %>%
+  # The data is already grouped by NEW_DIST, so we just sum columns
+  mutate(
+    dem_votes = rowSums(select(., any_of(dem_cols)), na.rm = TRUE),
+    rep_votes = rowSums(select(., any_of(rep_cols)), na.rm = TRUE)
+  ) %>%
+  select(DISTRICT = NEW_DIST, dem_votes, rep_votes) %>%
+  filter(dem_votes > 0 | rep_votes > 0)
+
+# Display the first few rows
+cat("Aggregated D vs. R Votes by District (Proposed Map):\n")
+knitr::kable(head(hypothetical_partisan_votes))
+```
+
+### 6.3. Calculate Metrics (Proposed Map)
+
+We use the *exact same* logic and helper function from Part 4.
+
+```{r calculate-metrics-proposed}
+# 1. Calculate vote shares and wasted votes
+metric_data_proposed <- hypothetical_partisan_votes %>%
+  rowwise() %>%
+  mutate(
+    wasted = list(calculate_wasted_votes(dem_votes, rep_votes)),
+    wasted_dem = wasted$wasted_A,
+    wasted_rep = wasted$wasted_B
+  ) %>%
+  ungroup() %>%
+  mutate(
+    total_votes = dem_votes + rep_votes,
+    dem_share = dem_votes / total_votes
+  ) %>%
+  filter(total_votes > 0)
+
+# 2. Calculate Efficiency Gap (Proposed)
+total_votes_statewide_prop <- sum(metric_data_proposed$total_votes)
+total_wasted_dem_prop <- sum(metric_data_proposed$wasted_dem)
+total_wasted_rep_prop <- sum(metric_data_proposed$wasted_rep)
+
+efficiency_gap_prop <- (total_wasted_dem_prop - total_wasted_rep_prop) / total_votes_statewide_prop
+
+# 3. Calculate Mean-Median Score (Proposed)
+mean_dem_share_prop <- mean(metric_data_proposed$dem_share, na.rm = TRUE)
+median_dem_share_prop <- median(metric_data_proposed$dem_share, na.rm = TRUE)
+
+mean_median_score_prop <- mean_dem_share_prop - median_dem_share_prop
+
+# 4. Calculate Seat Share (Proposed)
+dem_seats_prop <- sum(metric_data_proposed$dem_votes > metric_data_proposed$rep_votes)
+rep_seats_prop <- sum(metric_data_proposed$rep_votes > metric_data_proposed$dem_votes)
+total_seats_prop <- dem_seats_prop + rep_seats_prop
+dem_seat_share_prop <- dem_seats_prop / total_seats_prop
+```
+
+### 6.4. Results for Proposed Map
+
+Here are the metrics for the hypothetical election under the AB 604 map.
+
+```{r print-results-proposed, echo=FALSE}
+cat(sprintf("--- Hypothetical 2024 Election Results (n = %d Districts) ---\n\n", total_seats_prop))
+
+cat(sprintf("Seat Share:\n"))
+cat(sprintf("  Democrats: %d seats (%.1f%%)\n", dem_seats_prop, dem_seat_share_prop * 100))
+cat(sprintf("  Republicans: %d seats (%.1f%%)\n\n", rep_seats_prop, (1 - dem_seat_share_prop) * 100))
+
+cat(sprintf("Efficiency Gap:\n"))
+cat(sprintf("  Score: %.3f%% \n", efficiency_gap_prop * 100))
+if (efficiency_gap_prop > 0) {
+  cat("  Interpretation: A positive value suggests the map is biased *against* Democrats (in favor of Republicans).\n\n")
+} else {
+  cat("  Interpretation: A negative value suggests the map is biased *against* Republicans (in favor of Democrats).\n\n")
+}
+
+cat(sprintf("Mean-Median Score (for Democratic Vote Share):\n"))
+cat(sprintf("  Mean D-Share:   %.3f%%\n", mean_dem_share_prop * 100))
+cat(sprintf("  Median D-Share: %.3f%%\n", median_dem_share_prop * 100))
+cat(sprintf("  Score (Mean - Median): %.3f%%\n", mean_median_score_prop * 100))
+if (mean_median_score_prop > 0) {
+  cat("  Interpretation: A positive score (Mean > Median) suggests Democratic votes are 'packed' in uncompetitive districts, a disadvantage.\n")
+} else {
+  cat("  Interpretation: A negative score (Mean < Median) suggests Democratic votes are distributed more efficiently ('cracked'), an advantage.\n")
+}
+
+# Save results for dashboard
+write_csv(metric_data_proposed, "metric_data_proposed.csv")
+cat("\nSaved proposed map metric data to metric_data_proposed.csv\n")
